@@ -23,6 +23,7 @@ PKG := k8s.io/ingress-gce
 # for each BINARY.
 CONTAINER_BINARIES ?= \
 	404-server \
+	404-server-with-metrics \
 	e2e-test \
 	echo \
 	fuzzer \
