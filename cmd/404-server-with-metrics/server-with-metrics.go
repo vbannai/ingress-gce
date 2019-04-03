@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2019 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// A webserver that only serves a 404 page. Used as a default backend for ingress gce object for kubernetes cluster.
+// A webserver that only serves a 404 page. Used as a default backend for ingress gce
 package main
 
 import (
@@ -28,46 +28,50 @@ import (
 	"runtime"
 	"time"
 
+	"k8s.io/klog"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	// command line flags/arguments
 	port              = flag.Int("port", 8080, "Port number to serve default backend 404 page.")
 	serverTimeout     = flag.Duration("timeout", 5*time.Second, "Time in seconds to wait before forcefully terminating the server.")
-	readTimeout       = flag.Duration("read timeout", 10*time.Second, "Time in seconds to read the entire request before timing out.")
-	readHeaderTimeout = flag.Duration("read header timeout", 10*time.Second, "Time in seconds to read the request header before timing out.")
-	writeTimeout      = flag.Duration("write timeout", 10*time.Second, "Time in seconds to write response before timing out.")
-	idleTimeout       = flag.Duration("idle timeout", 10*time.Second, "Time in seconds to wait for the next request when keep-alives are enabled.")
-	maxJobs           = flag.Int("max workers", 100, "Number of parallel/concurrent jobs to run.")
-	idleLogTimer      = flag.Duration("idle log timeout", 1*time.Hour, "Timer for keep alive logger")
-	logSampleRequests = flag.Float64("log percent of sample requests", 0.0, "Sample http requests to log [0.0 to 1.0]")
+	readTimeout       = flag.Duration("read_timeout", 10*time.Second, "Time in seconds to read the entire request before timing out.")
+	readHeaderTimeout = flag.Duration("read_header_timeout", 10*time.Second, "Time in seconds to read the request header before timing out.")
+	writeTimeout      = flag.Duration("write_timeout", 10*time.Second, "Time in seconds to write response before timing out.")
+	idleTimeout       = flag.Duration("idle_timeout", 10*time.Second, "Time in seconds to wait for the next request when keep-alives are enabled.")
+	idleLogTimer      = flag.Duration("idle_log_timeout", 1*time.Hour, "Timer for keep alive logger.")
+	logSampleRequests = flag.Float64("log_percent_requests", 0.1, "Fraction of http requests to log [0.0 to 1.0].")
+	isProd            = flag.Bool("is_prod", true, "Indicates if the server is running in production.")
 )
 
 func main() {
 	flag.Parse()
+	klog.InitFlags(nil)
+
 	hostName, err := os.Hostname()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not get the hostname: %v\n", err)
+		klog.Fatalf("could not get the hostname: %v\n", err)
+		os.Exit(1)
 	}
 
 	server := newServer(hostName, *port)
 	server.registerHandlers()
-	fmt.Fprintf(os.Stderr, "Default 404 server is running with GOMAXPROCS(%d) on %s:%d\n", runtime.GOMAXPROCS(-1), hostName, *port)
+	klog.Infof("Default 404 server is running with GOMAXPROCS(%d) on %s:%d\n", runtime.GOMAXPROCS(-1), hostName, *port)
 
 	go func() {
 		err := server.httpServer.ListenAndServe()
 		if err != nil {
 			switch err {
 			case http.ErrServerClosed:
-				fmt.Fprintf(os.Stderr, "server shutting down or received shutdown: %v\n", err)
+				klog.Infof("server shutting down or received shutdown: %v\n", err)
 				os.Exit(0)
 			case http.ErrHandlerTimeout:
-				fmt.Fprintf(os.Stderr, "handler timedout: %v\n", err)
+				klog.Warningf("handler timed out: %v\n", err)
 			default:
-				// Should we Fatal() ?
-				fmt.Fprintf(os.Stderr, "could not start http server or internal error: %v\n", err)
+				klog.Fatalf("could not start http server or internal error: %v\n", err)
+				os.Exit(1)
 			}
 		}
 	}()
@@ -78,7 +82,7 @@ func main() {
 			select {
 			case <-server.idleChannel:
 			case <-time.After(*idleLogTimer):
-				fmt.Fprintf(os.Stderr, "No connection requests received for 1 hour\n")
+				klog.Infof("No connection requests received for 1 hour\n")
 			}
 		}
 	}()
@@ -108,6 +112,7 @@ type server struct {
 func newServer(hostName string, port int) *server {
 	s := &server{
 		httpServer: &http.Server{
+			// TODO(bannai): make the binding to the hostname, instead of all the names
 			Addr:              fmt.Sprintf(":%d", port),
 			ReadTimeout:       *readTimeout,
 			ReadHeaderTimeout: *readHeaderTimeout,
@@ -150,7 +155,10 @@ func newServer(hostName string, port int) *server {
 func (s *server) registerHandlers() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.notFoundHandler())
-	mux.HandleFunc("/shutdown", s.shutdownHandler())
+	// enable shutdown handler only for non-prod environments
+	if *isProd == false {
+		mux.HandleFunc("/shutdown", s.shutdownHandler())
+	}
 	mux.Handle("/metrics", promhttp.Handler())
 
 	s.mux = mux
@@ -183,11 +191,11 @@ func (s *server) notFoundHandler() http.HandlerFunc {
 
 		path := r.URL.Path
 		w.WriteHeader(http.StatusNotFound)
-		// We log 1 out of 4 requests to the logs (make it configurable by a flag??)
-		fmt.Fprintf(w, "reached NotFound backend, service rules not setup correctly for %s \n", path)
+		// we log 1 out of 10 requests (by default) to the logs
+		fmt.Fprintf(w, "response 404 (backend NotFound), service rules for [ %s ] non-existent \n", path)
 		s.idleChannel <- true
 		if rand.Float64() < *logSampleRequests {
-			fmt.Fprintf(os.Stderr, "reached NotFound backend, service rules not setup correctly for %s \n", path)
+			klog.Infof("response 404 (backend NotFound), service rules for [ %s ] non-existent \n", path)
 		}
 	}
 }
@@ -201,9 +209,9 @@ func gracefulShutdown(s *server) {
 
 	select {
 	case interrupt := <-c:
-		fmt.Fprintf(os.Stderr, "received interrupt, doing a graceful shutdown: %v \n", interrupt)
+		klog.Infof("received interrupt, doing a graceful shutdown: %v \n", interrupt)
 	case <-s.ctx.Done():
-		fmt.Fprintf(os.Stderr, "received /shutdown message, doing a graceful shutdown: \n")
+		klog.Infof("received /shutdown message, doing a graceful shutdown: \n")
 	}
 
 	s.httpServer.Shutdown(context.Background())
